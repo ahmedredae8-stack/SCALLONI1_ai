@@ -15,17 +15,14 @@ API_HASH = "b18441a1ff607e10a989891a5462e627"
 print("⚡ جاري تشغيل المحرك الرئيسي للبوت VIP...")
 bot = TelegramClient("vip_control_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# ذاكرة حفظ الجلسات والبيانات الحية
 user_data = {}
 
-# ------------------- دالة رسم شريط التقدم -------------------
 def create_progress_bar(current, total):
     percent = int((current / total) * 100)
     filled_length = int(10 * current // total)
     bar = "█" * filled_length + "░" * (10 - filled_length)
     return f"[{bar}] {percent}% ({current}/{total})"
 
-# ------------------- أمر البدء /start -------------------
 @bot.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
     sender_id = event.sender_id
@@ -41,7 +38,6 @@ async def start_handler(event):
     buttons = [[Button.inline("❌ إلغاء العملية", data="cancel")]]
     await event.respond(welcome_text, buttons=buttons)
 
-# ------------------- استقبال الأزرار الشفافة -------------------
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     sender_id = event.sender_id
@@ -55,7 +51,6 @@ async def callback_handler(event):
         await event.edit("🚀 **بدأت العملية الآن! جاري فحص وسحب المتفاعلين...**")
         await run_scraping_process(event, sender_id)
 
-# ------------------- معالج الرسائل وخطوات العميل -------------------
 @bot.on(events.NewMessage)
 async def message_handler(event):
     if event.text.startswith("/"):
@@ -67,65 +62,78 @@ async def message_handler(event):
 
     step = user_data[sender_id].get("step")
 
-    # 1️⃣ استقبال رقم الهاتف
+    # 1️⃣ استقبال رقم الهاتف وطلب الكود
     if step == "waiting_phone":
         phone = event.text.strip()
-        user_data[sender_id]["phone"] = phone
-        user_data[sender_id]["step"] = "waiting_code"
+        loading_msg = await event.respond("🔄 **جاري طلب كود التحقق من تليجرام...**")
         
-        msg = (
-            "📲 **تم استلام الرقم بنجاح!**\n\n"
-            "📩 أرسل الآن **كود التحقق** الذي وصلك في تطبيق التليجرام.\n"
-            "⚠️ *ملاحظة للأمان:* اكتب الكود وبينه مسافات لتجنب حظره من النظام.\n"
-            "*(مثال: اكتب `1 2 3 4 5` بدلاً من `12345`)*"
-        )
-        await event.respond(msg, buttons=[[Button.inline("❌ إلغاء", data="cancel")]])
+        client = TelegramClient(f"session_{sender_id}", API_ID, API_HASH)
+        await client.connect()
+
+        try:
+            sent_code = await client.send_code_request(phone)
+            
+            user_data[sender_id]["client"] = client
+            user_data[sender_id]["phone"] = phone
+            user_data[sender_id]["phone_code_hash"] = sent_code.phone_code_hash
+            user_data[sender_id]["step"] = "waiting_code"
+            
+            await loading_msg.delete()
+            msg = (
+                "📲 **تم إرسال كود التحقق بنجاح إلى تطبيق التليجرام الخاص بك!**\n"
+                "*(تأكد من مراجعة رسائل تليجرام الرسمية Telegram Notifications)*\n\n"
+                "📩 أرسل الآن **كود التحقق** هنا.\n"
+                "⚠️ *مثال:* اكتب الأرقام وبشكل مرتب (مثل: `1 2 3 4 5`)"
+            )
+            await event.respond(msg, buttons=[[Button.inline("❌ إلغاء", data="cancel")]])
+
+        except Exception as e:
+            await loading_msg.delete()
+            await event.respond(f"❌ **حدث خطأ في رقم الهاتف:** `{e}`\nتأكد من كتابة الرقم بشكل صحيح مع رمز الدولة وأرسل /start مجدداً.")
+            user_data.pop(sender_id, None)
 
     # 2️⃣ استقبال كود التحقق
     elif step == "waiting_code":
         code = event.text.replace(" ", "").strip()
         phone = user_data[sender_id]["phone"]
+        phone_code_hash = user_data[sender_id]["phone_code_hash"]
+        client = user_data[sender_id]["client"]
         
-        loading_msg = await event.respond("🔄 **جاري التحقق وتسجيل الدخول الآمن...**")
-        client = TelegramClient(f"session_{sender_id}", API_ID, API_HASH)
-        await client.connect()
+        loading_msg = await event.respond("🔄 **جاري التحقق من الكود...**")
 
         try:
-            await client.sign_in(phone, code)
-            user_data[sender_id]["client"] = client
+            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
             user_data[sender_id]["step"] = "waiting_group"
             
             msg = (
                 "✅ **تم الاتصال بالحساب بنجاح!**\n"
                 "──────────────────────────────\n"
-                "🎯 أرسل الآن **رابط أو يوزر الجروب** المستهدف.\n"
+                "🎯 أرسل الآن **رابط أو يوزر الجروب** المستهدف للسحب منه.\n"
                 "*(مثال: `@group_name` أو `https://t.me/group_name`)*"
             )
             await loading_msg.delete()
             await event.respond(msg, buttons=[[Button.inline("❌ إلغاء", data="cancel")]])
 
         except SessionPasswordNeededError:
-            user_data[sender_id]["temp_client"] = client
             user_data[sender_id]["step"] = "waiting_password"
             await loading_msg.delete()
-            await event.respond("🔒 **الحساب محمي بالتحقق بخطوتين.**\nأرسل كلمة المرور (Password) الخاصة بك:")
+            await event.respond("🔒 **الحساب محمي بالتحقق بخطوتين (Password).**\nأرسل كلمة المرور الخاصة بك:")
 
         except PhoneCodeInvalidError:
             await loading_msg.delete()
-            await event.respond("❌ **كود التحقق غير صحيح!** أعد كتابته بشكل صحيح:")
+            await event.respond("❌ **كود التحقق غير صحيح أو انتهت صلاحيته!** أعد إرساله بشكل صحيح:")
 
         except Exception as e:
             await loading_msg.delete()
             await event.respond(f"❌ **حدث خطأ:** `{e}`\nأرسل /start للبدء من جديد.")
             user_data.pop(sender_id, None)
 
-    # 3️⃣ كلمة المرور (إذا وجدت)
+    # 3️⃣ كلمة المرور للتحقق بخطوتين
     elif step == "waiting_password":
         password = event.text.strip()
-        client = user_data[sender_id]["temp_client"]
+        client = user_data[sender_id]["client"]
         try:
             await client.sign_in(password=password)
-            user_data[sender_id]["client"] = client
             user_data[sender_id]["step"] = "waiting_group"
             await event.respond("✅ **تم تسجيل الدخول بنجاح!**\n\n🎯 أرسل الآن **رابط الجروب** المستهدف:")
         except PasswordHashInvalidError:
@@ -166,7 +174,7 @@ async def message_handler(event):
             )
             await event.respond(msg)
         except ValueError:
-            await event.respond("❌ **يرجى إدخال أرقام فقط!**")
+            await event.respond("❌ **يرجى إدخال أرقام صحيحة فقط!**")
 
     # 7️⃣ استقبال الوقت وتأكيد التشغيل
     elif step == "waiting_delay":
@@ -174,7 +182,6 @@ async def message_handler(event):
             delay = int(event.text.strip())
             user_data[sender_id]["delay"] = delay
             
-            # ملخص الحملة
             summary = (
                 "📋 **مراجعة وتأكيد بيانات الحملة (VIP)**\n"
                 "──────────────────────────────\n"
@@ -192,9 +199,8 @@ async def message_handler(event):
             await event.respond(summary, buttons=buttons)
 
         except ValueError:
-            await event.respond("❌ **يرجى إدخال أرقام فقط!**")
+            await event.respond("❌ **يرجى إدخال أرقام صحيحة فقط!**")
 
-# ------------------- عملية السحب والإرسال الفعلية -------------------
 async def run_scraping_process(event, sender_id):
     data = user_data[sender_id]
     client = data["client"]
@@ -207,7 +213,6 @@ async def run_scraping_process(event, sender_id):
 
     active_users = []
     try:
-        # قراءة الشات لسحب الأعضاء النشطين
         async for message in client.iter_messages(target_group, limit=400):
             if message.sender_id and message.sender:
                 user = message.sender
@@ -218,7 +223,7 @@ async def run_scraping_process(event, sender_id):
 
         total_found = len(active_users)
         if total_found == 0:
-            await status_msg.edit("❌ **لم يتم العثور على مستفاعلين متاحين لديهم Username في هذا الجروب.**")
+            await status_msg.edit("❌ **لم يتم العثور على مستخدمين متفاعلين لديهم Username في هذا الجروب.**")
             return
 
         target_count = min(daily_limit, total_found)
@@ -234,10 +239,9 @@ async def run_scraping_process(event, sender_id):
                 await client.send_message(username, message_text)
                 sent_count += 1
                 
-                # تحديث شريط التقدم الفخم
                 progress = create_progress_bar(sent_count, target_count)
                 update_text = (
-                    f"⚡ **حملة الإرسال شغالـة الآن...**\n\n"
+                    f"⚡ **حملة الإرسال شغالة الآن...**\n\n"
                     f"📊 **التقدم:**\n`{progress}`\n\n"
                     f"👤 **آخر إرسال إلى:** @{username}\n"
                     f"⏱️ **الانتظار للرسالة القادمة:** {delay} ثانية..."
@@ -251,7 +255,6 @@ async def run_scraping_process(event, sender_id):
             except Exception as ex:
                 await asyncio.sleep(3)
 
-        # رسالة النهاية الاحترافية
         final_text = (
             "🎉 **تمت الحملة بنجاح كامل!**\n"
             "──────────────────────────────\n"
@@ -264,8 +267,7 @@ async def run_scraping_process(event, sender_id):
     except Exception as e:
         await bot.send_message(sender_id, f"❌ **حدث خطأ أثناء العملية:** `{e}`")
 
-    # تنظيف الجلسة
     user_data.pop(sender_id, None)
 
-print("👑 بوت التحكم الـ VIP يعمل الآن بنجاح على أرقام السيرفر!")
+print("👑 بوت التحكم الـ VIP يعمل الآن بنجاح وجاهز لاستقبال الأوامر!")
 bot.run_until_complete(bot.run_until_disconnected())
